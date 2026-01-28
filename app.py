@@ -262,6 +262,20 @@ auto_refresh = st.sidebar.checkbox("Enable Auto-Refresh", value=False)
 refresh_interval = st.sidebar.number_input("Refresh Interval (seconds)", min_value=5, value=30, step=5)
 
 # Determine if we should run
+# Client View Toggle (Hide Sidebar)
+client_view = st.checkbox("Enable Client View (Full Page)", value=bool(shared_token))
+
+if client_view:
+    st.markdown(
+        """
+        <style>
+            [data-testid="stSidebar"] {display: none;}
+            [data-testid="collapsedControl"] {display: none;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
 run_once = st.button("🔄 Refresh Data", type="primary")
 should_run = run_once or auto_refresh
 
