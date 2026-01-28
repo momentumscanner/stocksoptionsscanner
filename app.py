@@ -596,7 +596,7 @@ if should_run:
             df_results["ATM Strike"] = df_results["ATM Strike"].astype(float).round(2)
         
         # Rename Stock Name to include timestamp for fullscreen visibility
-        time_str = datetime.datetime.now().strftime("%H:%M:%S")
+        time_str = get_ist_now().strftime("%H:%M:%S")
         df_results = df_results.rename(columns={"Stock Name": f"Stock Name ({time_str})"})
     
     # Styling Function
