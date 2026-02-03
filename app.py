@@ -32,12 +32,16 @@ st.sidebar.header("Configuration")
 # --- Token Management ---
 TOKEN_FILE = ".token_cache"
 
+def get_today_str():
+    """Get today's date in IST string format"""
+    return str(get_ist_now().date())
+
 def load_cached_token():
     if os.path.exists(TOKEN_FILE):
         try:
             with open(TOKEN_FILE, "r") as f:
                 data = json.load(f)
-                if data.get("date") == str(datetime.date.today()):
+                if data.get("date") == get_today_str():
                     return data.get("token")
         except:
             pass
@@ -45,16 +49,19 @@ def load_cached_token():
 
 def save_token_to_cache(token):
     with open(TOKEN_FILE, "w") as f:
-        json.dump({"token": token, "date": str(datetime.date.today())}, f)
+        json.dump({"token": token, "date": get_today_str()}, f)
 
 # Input for Access Token (Frontend Only)
 cached_token = load_cached_token()
 access_token = st.sidebar.text_input("Enter Upstox Access Token", type="password", value=cached_token if cached_token else "")
 
 if access_token:
+    # If user entered a new token, save it
     if access_token != cached_token:
         save_token_to_cache(access_token)
-    st.sidebar.success("✅ Token Provided")
+        st.sidebar.success("✅ New Token Saved for Today")
+    else:
+        st.sidebar.success("✅ Token Loaded from Cache (Valid for Today)")
 else:
     st.warning("Please enter your Access Token in the sidebar to proceed.")
     st.stop()
