@@ -15,13 +15,13 @@ def get_ist_now():
     return datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
 
 # --- Configuration ---
-st.set_page_config(page_title="Live Option Scanner", layout="wide")
+st.set_page_config(page_title="Intraday Option Scanner", layout="wide")
 
 # Update time for header
 update_time = get_ist_now().strftime("%Y-%m-%d %H:%M:%S")
 st.markdown(f"""
     <div style='display: flex; justify-content: space-between; align-items: center; margin-top: -20px; margin-bottom: 10px;'>
-        <h3 style='margin: 0;'>Live Option Scanner</h3>
+        <h3 style='margin: 0;'>Intraday Option Scanner</h3>
         <span style='font-size: 1rem; color: #555;'>Last Updated: {update_time} (IST)</span>
     </div>
 """, unsafe_allow_html=True)
@@ -29,39 +29,50 @@ st.markdown(f"""
 # --- Sidebar Inputs ---
 st.sidebar.header("Configuration")
 
-# Try to get token from Secrets (Shared Mode) or Sidebar (Personal Mode)
-# Secrets are set in Streamlit Cloud Dashboard
-shared_token = None
-try:
-    if "UPSTOX_TOKEN" in st.secrets:
-        shared_token = st.secrets["UPSTOX_TOKEN"]
-except FileNotFoundError:
-    pass
+# --- Token Management ---
+TOKEN_FILE = ".token_cache"
 
-if shared_token:
-    access_token = shared_token
-    st.sidebar.success("✅ Shared Access Token Loaded")
-    # Optional: Allow override if needed, or just hide input
-    # override_token = st.sidebar.text_input("Override Token (Optional)", type="password")
-    # if override_token:
-    #     access_token = override_token
+def load_cached_token():
+    if os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE, "r") as f:
+                data = json.load(f)
+                if data.get("date") == str(datetime.date.today()):
+                    return data.get("token")
+        except:
+            pass
+    return None
+
+def save_token_to_cache(token):
+    with open(TOKEN_FILE, "w") as f:
+        json.dump({"token": token, "date": str(datetime.date.today())}, f)
+
+# Input for Access Token (Frontend Only)
+cached_token = load_cached_token()
+access_token = st.sidebar.text_input("Enter Upstox Access Token", type="password", value=cached_token if cached_token else "")
+
+if access_token:
+    if access_token != cached_token:
+        save_token_to_cache(access_token)
+    st.sidebar.success("✅ Token Provided")
 else:
-    access_token = st.sidebar.text_input("Access Token", type="password")
-
-if not access_token:
     st.warning("Please enter your Access Token in the sidebar to proceed.")
     st.stop()
 
 # --- Instruments Data Synchronization ---
 INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
 INSTRUMENTS_FILE = 'NSE.json'
+CACHE_FILE = 'instruments_cache.pkl'
 
 def is_file_fresh(filepath):
     """Check if file exists and is from today"""
     if not os.path.exists(filepath):
         return False
-    file_time = datetime.datetime.fromtimestamp(os.path.getmtime(filepath))
-    return file_time.date() == datetime.date.today()
+    try:
+        file_time = datetime.datetime.fromtimestamp(os.path.getmtime(filepath))
+        return file_time.date() == datetime.date.today()
+    except:
+        return False
 
 def download_and_extract_instruments():
     """Download and unzip instruments file to NSE.json"""
@@ -94,91 +105,87 @@ def download_and_extract_instruments():
         return False
 
 # --- Data Loading ---
-@st.cache_data(ttl=3600*4)  # Cache for 4 hours
+@st.cache_data(ttl=3600*4, show_spinner=False)  # Cache for 4 hours
 def load_data():
-    # Check freshness and download if needed
-    if not is_file_fresh(INSTRUMENTS_FILE):
-        if not download_and_extract_instruments():
-             # If download failed, try to use existing file
-             if not os.path.exists(INSTRUMENTS_FILE):
+    df = None
+    
+    # 1. Try to load from fast pickle cache first
+    if is_file_fresh(CACHE_FILE):
+        try:
+            df = pd.read_pickle(CACHE_FILE)
+            # print("DEBUG: Loaded from Pickle Cache")
+        except Exception:
+            df = None
+
+    # 2. If no cache, load from raw JSON
+    if df is None:
+        # Check freshness and download if needed
+        if not is_file_fresh(INSTRUMENTS_FILE):
+            if not download_and_extract_instruments():
+                 # If download failed, try to use existing file
+                 if not os.path.exists(INSTRUMENTS_FILE):
+                     return pd.DataFrame(), pd.DataFrame()
+
+        # Load and Filter NSE.json directly
+        try:
+            with open(INSTRUMENTS_FILE, 'r') as f:
+                data = json.load(f)
+                
+            # Filter list before creating DataFrame
+            filtered_data = [
+                row for row in data 
+                if row.get('segment') == 'NSE_FO' and row.get('asset_type') in ['EQUITY', 'INDEX']
+            ]
+            
+            del data # Free huge memory immediately
+
+            if not filtered_data:
                  return pd.DataFrame(), pd.DataFrame()
 
-    # Load and Filter NSE.json directly
-    try:
-        # We need to filter WHILE loading to save memory if possible, 
-        # but standard json.load reads all. 
-        # So we load, filter immediately, then delete raw.
-        with open(INSTRUMENTS_FILE, 'r') as f:
-            data = json.load(f)
+            # Convert to DataFrame
+            df = pd.DataFrame(filtered_data)
+            del filtered_data # Free list memory
             
-        # DEBUG: Print data stats
-        print(f"DEBUG: Loaded {len(data)} records from NSE.json")
-        unique_segments = set(row.get('segment') for row in data[:1000]) # Check first 1000
-        print(f"DEBUG: Sample segments: {unique_segments}")
-
-        # Optimize: Filter list before creating DataFrame
-        filtered_data = [
-            row for row in data 
-            if row.get('segment') == 'NSE_FO' and row.get('asset_type') in ['EQUITY', 'INDEX']
-        ]
-        
-        print(f"DEBUG: Filtered down to {len(filtered_data)} records")
-
-        if not filtered_data:
-             st.error(f"No NSE_FO data found in NSE.json! Total records: {len(data)}. Segments found: {list(set(r.get('segment') for r in data[:5000]))}")
-             return pd.DataFrame(), pd.DataFrame()
-
-        del data # Free huge memory immediately
-
-        # Convert to DataFrame
-        df = pd.DataFrame(filtered_data)
-        del filtered_data # Free list memory
-        
-        # 1. Options DF (All NSE_FO EQUITY/INDEX)
-        # This is used for looking up CE/PE
-        options_df = df.copy()
-        
-        # 2. Futures DF (Current Month FUT)
-        # Filter for FUT
-        df_fut = df[df['instrument_type'].str.contains('FUT', na=False)].copy()
-        
-        # Filter for Near Month Expiry (Nearest valid expiry >= Today)
-        if 'expiry' in df_fut.columns:
-            # Convert expiry from milliseconds to datetime for filtering
-            df_fut['expiry_dt'] = pd.to_datetime(df_fut['expiry'], unit='ms')
+            # Save to fast cache for next run
+            df.to_pickle(CACHE_FILE)
             
-            # Use IST date for comparison
-            current_date = get_ist_now().date()
-            
-            # Filter futures that haven't expired yet
-            # We want expiry >= today (or strictly > today if expired yesterday)
-            # Upstox removes expired contracts from NSE.json usually, but let's be safe.
-            active_futures = df_fut[df_fut['expiry_dt'].dt.date >= current_date]
-            
-            if not active_futures.empty:
-                # Find the nearest expiry date across ALL active futures
-                nearest_expiry = active_futures['expiry_dt'].min()
-                print(f"DEBUG: Found nearest expiry: {nearest_expiry}")
-                
-                # Filter only futures matching this nearest expiry (e.g., Feb if Jan is gone)
-                df_fut = active_futures[active_futures['expiry_dt'] == nearest_expiry]
-            else:
-                print("DEBUG: No active futures found (all expired?)")
-                df_fut = pd.DataFrame() # Force empty to trigger error
+        except Exception as e:
+            st.error(f"Error loading NSE.json: {e}")
+            return pd.DataFrame(), pd.DataFrame()
 
-            # Drop temp column
-            if not df_fut.empty:
-                df_fut = df_fut.drop(columns=['expiry_dt'])
-            
-        futures_df = df_fut
+    # --- Process DataFrames ---
+    
+    # 1. Options DF (All NSE_FO EQUITY/INDEX)
+    options_df = df.copy()
+    
+    # 2. Futures DF (Current Month FUT)
+    df_fut = df[df['instrument_type'].str.contains('FUT', na=False)].copy()
+    
+    # Filter for Near Month Expiry (Nearest valid expiry >= Today)
+    if 'expiry' in df_fut.columns:
+        # Convert expiry from milliseconds to datetime for filtering
+        df_fut['expiry_dt'] = pd.to_datetime(df_fut['expiry'], unit='ms')
         
-    except Exception as e:
-        st.error(f"Error loading NSE.json: {e}")
-        # DEBUG: Print detailed error to console
-        print(f"CRITICAL ERROR loading NSE.json: {e}")
-        import traceback
-        traceback.print_exc()
-        return pd.DataFrame(), pd.DataFrame()
+        # Use IST date for comparison
+        current_date = get_ist_now().date()
+        
+        # Filter futures that haven't expired yet
+        active_futures = df_fut[df_fut['expiry_dt'].dt.date >= current_date]
+        
+        if not active_futures.empty:
+            # Find the nearest expiry date across ALL active futures
+            nearest_expiry = active_futures['expiry_dt'].min()
+            
+            # Filter only futures matching this nearest expiry
+            df_fut = active_futures[active_futures['expiry_dt'] == nearest_expiry]
+        else:
+            df_fut = pd.DataFrame()
+
+        # Drop temp column
+        if not df_fut.empty:
+            df_fut = df_fut.drop(columns=['expiry_dt'])
+        
+    futures_df = df_fut
         
     # Convert expiry to datetime
     if 'expiry' in futures_df.columns:
@@ -263,7 +270,7 @@ refresh_interval = st.sidebar.number_input("Refresh Interval (seconds)", min_val
 
 # Determine if we should run
 # Client View Toggle (Hide Sidebar)
-client_view = st.checkbox("Enable Client View (Full Page)", value=bool(shared_token))
+client_view = st.checkbox("Enable Client View (Full Page)", value=False)
 
 if client_view:
     st.markdown(
